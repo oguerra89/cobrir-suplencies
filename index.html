@@ -450,10 +450,14 @@ function buildLoginPage(){
   +'<p style="color:#94a3b8;font-size:0.75rem;line-height:1.5;margin-top:1rem;">Cada escola accedeix de forma independent. Les dades no es comparteixen entre centres.</p></div></div>';
 }
 function buildEtapes(){
-  var btns=ETAPES.map(function(e){
-    return'<button onclick="canviarEtapa(this.getAttribute(\'data-id\'))" data-id="'+e.id+'" style="flex-shrink:0;padding:0.375rem 0.875rem;border-radius:9999px;font-size:0.75rem;font-weight:700;border:none;cursor:pointer;background:'+(state.etapa===e.id?e.color:"#334155")+';color:white;display:flex;align-items:center;gap:0.25rem;"><span>'+e.icon+'</span><span>'+e.label+'</span></button>';
-  });
-  return'<div style="background:#1e293b;padding:0.5rem 1.25rem;display:flex;gap:0.375rem;overflow-x:auto;flex-shrink:0;">'+btns.join("")+'</div>';
+  var html='<div style="background:#1e293b;padding:0.5rem 1.25rem;display:flex;gap:0.375rem;overflow-x:auto;flex-shrink:0;">';
+  for(var i=0;i<ETAPES.length;i++){
+    var e=ETAPES[i];
+    var bg=state.etapa===e.id?e.color:"#334155";
+    html+='<button onclick="window.canviarEtapa(\''+e.id+'\')" style="flex-shrink:0;padding:0.375rem 0.875rem;border-radius:9999px;font-size:0.75rem;font-weight:700;border:none;cursor:pointer;background:'+bg+';color:white;display:flex;align-items:center;gap:0.25rem;"><span>'+e.icon+'</span><span>'+e.label+'</span></button>';
+  }
+  html+='</div>';
+  return html;
 }
 
 function buildHeader(){
