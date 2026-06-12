@@ -9,7 +9,7 @@
 <body style="margin:0;padding:0;background:#f1f5f9;font-family:'Segoe UI',system-ui,sans-serif;">
 <div id="root"></div>
 
-<div id="root"></div>
+
 <script>
 const GOOGLE_CLIENT_ID="606240844521-bh49fhgnvcjdr4oaalbjgfac85s58q1g.apps.googleusercontent.com";
 const DIES=["Dilluns","Dimarts","Dimecres","Dijous","Divendres"];
@@ -450,11 +450,12 @@ function buildLoginPage(){
   +'<p style="color:#94a3b8;font-size:0.75rem;line-height:1.5;margin-top:1rem;">Cada escola accedeix de forma independent. Les dades no es comparteixen entre centres.</p></div></div>';
 }
 function buildEtapes(){
-  const etapaActual=ETAPES.find(e=>e.id===state.etapa)||ETAPES[1];
-  return'<div style="background:#1e293b;padding:0.5rem 1.25rem;display:flex;gap:0.375rem;overflow-x:auto;flex-shrink:0;">'+
-  ETAPES.map(e=>'<button onclick="canviarEtapa(\'"+e.id+"\')" style="flex-shrink:0;padding:0.375rem 0.875rem;border-radius:9999px;font-size:0.75rem;font-weight:700;border:none;cursor:pointer;background:'+(state.etapa===e.id?e.color:"#334155")+';color:white;display:flex;align-items:center;gap:0.25rem;"><span>'+e.icon+'</span><span>'+e.label+'</span></button>').join("")+
-  '</div>';
+  var btns=ETAPES.map(function(e){
+    return'<button onclick="canviarEtapa(this.getAttribute(\'data-id\'))" data-id="'+e.id+'" style="flex-shrink:0;padding:0.375rem 0.875rem;border-radius:9999px;font-size:0.75rem;font-weight:700;border:none;cursor:pointer;background:'+(state.etapa===e.id?e.color:"#334155")+';color:white;display:flex;align-items:center;gap:0.25rem;"><span>'+e.icon+'</span><span>'+e.label+'</span></button>';
+  });
+  return'<div style="background:#1e293b;padding:0.5rem 1.25rem;display:flex;gap:0.375rem;overflow-x:auto;flex-shrink:0;">'+btns.join("")+'</div>';
 }
+
 function buildHeader(){
   const nomsMestres=Object.keys(state.mestres);
   const registreAvui=state.registre.filter(r=>r.dia===state.diaAvui);
@@ -568,7 +569,7 @@ function buildHoraris(){
 }
 
 window.setPage=p=>setState({page:p});
-window.canviarEtapa=canviarEtapa;
+window.canviarEtapa=function(id){canviarEtapa(id);};
 window.setSubpagina=p=>setState({subpaginaAvui:p});
 window.setDia=d=>setState({diaC:d,resultatsMultiple:null,canvisManuals:{}});
 window.setDiaAvui=d=>setState({diaAvui:d});
