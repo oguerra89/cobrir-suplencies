@@ -8,9 +8,7 @@
 </head>
 <body style="margin:0;padding:0;background:#f1f5f9;font-family:'Segoe UI',system-ui,sans-serif;">
 <div id="root"></div>
-<script></script>
-</head>
-<body style="margin:0;padding:0;background:#f1f5f9;font-family:'Segoe UI',system-ui,sans-serif;">
+
 <div id="root"></div>
 <script>
 const GOOGLE_CLIENT_ID="606240844521-bh49fhgnvcjdr4oaalbjgfac85s58q1g.apps.googleusercontent.com";
@@ -127,7 +125,7 @@ function canonFranja(s,franges){
 }
 const isTableRow=l=>l.trim().startsWith("|");
 const cleanCell=s=>s.replace(/\\\*/g,"*").replace(/\\/g,"").trim();
-function isSoroll(s){return isSoroll(s);}
+function isSoroll(s){const u=s.toUpperCase().replace(/\s/g,"");return["ESBARJO","ESPAIMIGDIA","CLAUSTRES","COMISSIONS","FORMACIO","REUNIONS"].some(k=>u.includes(k));}
 function parseHoraris(text,franges=FRANGES_DEFAULT){
   const m={};
   const blocks=text.replace(/\r\n/g,'\n').replace(/\r/g,'\n').trim().split(/\n{2,}/);
