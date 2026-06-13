@@ -427,6 +427,11 @@ async function importarDrive(){
   }catch(e){setState({driveEstat:"error",driveMsg:e.message,isLoadingDrive:false});}
 }
 
+
+function etapaBg(){
+  var colors={infantil:"#F3F0FF",primaria:"#EFF6FF",secundaria:"#F0FDF9"};
+  return colors[state.etapa]||"#F1F5F9";
+}
 function render(){
   const root=document.getElementById("root");
   root.innerHTML=buildHTML();
@@ -439,7 +444,7 @@ function render(){
 }
 function buildHTML(){
   if(!state.loggedIn)return buildLoginPage();
-  return'<div style="font-family:\'Segoe UI\',system-ui,sans-serif;max-width:480px;margin:0 auto;min-height:100vh;display:flex;flex-direction:column;">'+buildHeader()+buildEtapes()+buildNav()+'<div style="flex:1;overflow:auto;">'+(state.page==="cercar"?buildCercar():"")+(state.page==="avui"?buildAvui():"")+(state.page==="criteris"?buildCriteris():"")+(state.page==="horaris"?buildHoraris():"")+' </div></div>';
+  return'<div style="font-family:\'Segoe UI\',system-ui,sans-serif;max-width:480px;margin:0 auto;min-height:100vh;display:flex;flex-direction:column;background:'+etapaBg()+'">'+buildHeader()+buildEtapes()+buildNav()+'<div style="flex:1;overflow:auto;">'+(state.page==="cercar"?buildCercar():"")+(state.page==="avui"?buildAvui():"")+(state.page==="criteris"?buildCriteris():"")+(state.page==="horaris"?buildHoraris():"")+' </div></div>';
 }
 function buildLoginPage(){
   const googleCarregat=!!window.google;
@@ -454,7 +459,7 @@ function buildEtapes(){
   for(var i=0;i<ETAPES.length;i++){
     var e=ETAPES[i];
     var bg=state.etapa===e.id?e.color:"#334155";
-    html+='<button onclick="window.canviarEtapa(\''+e.id+'\')" style="flex-shrink:0;padding:0.375rem 0.875rem;border-radius:9999px;font-size:0.75rem;font-weight:700;border:none;cursor:pointer;background:'+bg+';color:white;display:flex;align-items:center;gap:0.25rem;"><span>'+e.icon+'</span><span>'+e.label+'</span></button>';
+    html+='<button onclick="window.canviarEtapa(\''+e.id+'\')" style="flex-shrink:0;padding:0.375rem 0.875rem;border-radius:9999px;font-size:0.75rem;font-weight:700;border:2px solid '+(state.etapa===e.id?e.color:"transparent")+';cursor:pointer;background:'+bg+';color:white;display:flex;align-items:center;gap:0.25rem;"><span>'+e.icon+'</span><span>'+e.label+'</span></button>';
   }
   html+='</div>';
   return html;
