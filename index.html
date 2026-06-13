@@ -1,0 +1,713 @@
+<!DOCTYPE html>
+<html lang="ca">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>Cobrir Suplències</title>
+<script src="https://accounts.google.com/gsi/client" async defer></script>
+</head>
+<body style="margin:0;padding:0;background:#f1f5f9;font-family:'Segoe UI',system-ui,sans-serif;">
+<div id="root"></div>
+
+
+<script>
+const GOOGLE_CLIENT_ID="606240844521-bh49fhgnvcjdr4oaalbjgfac85s58q1g.apps.googleusercontent.com";
+const DIES=["Dilluns","Dimarts","Dimecres","Dijous","Divendres"];
+const DIES_CURTS=["Dl","Dm","Dc","Dj","Dv"];
+const FRANGES_DEFAULT=[
+  {id:"9h",label:"9:00–10:00",inici:"9:00",fi:"10:00"},
+  {id:"10h",label:"10:00–11:00",inici:"10:00",fi:"11:00"},
+  {id:"11:30h",label:"11:30–12:35",inici:"11:30",fi:"12:35"},
+  {id:"14:30h",label:"14:30–15:15",inici:"14:30",fi:"15:15"},
+  {id:"15:15h",label:"15:15–16:05",inici:"15:15",fi:"16:05"},
+];
+let currentUser=null;
+function schoolKey(s){if(!currentUser)return null;const d=currentUser.email.split("@")[1]||"x";const u=currentUser.email.split("@")[0];return"sup_"+d+"_"+u+"_"+state.etapa+"_"+s;}
+function sGet(k){const key=schoolKey(k);if(!key)return null;try{const v=localStorage.getItem(key);return v?JSON.parse(v):null;}catch{return null;}}
+function sSet(k,v){const key=schoolKey(k);if(!key)return;try{localStorage.setItem(key,JSON.stringify(v));}catch{}}
+
+async function llegirSheets(sheetsId,tok){
+  // Llegir totes les pestanyes del Sheets
+  const metaUrl="https://sheets.googleapis.com/v4/spreadsheets/"+sheetsId+"?fields=sheets.properties.title";
+  const metaR=await fetch(metaUrl,{headers:{Authorization:"Bearer "+tok}});
+  if(!metaR.ok)throw new Error("Error llegint Sheets: "+metaR.status);
+  const meta=await metaR.json();
+  const sheets=meta.sheets||[];
+  const mestres={};
+  // Llegir CONFIG primer
+  const configSheet=sheets.find(s=>s.properties.title==="CONFIG");
+  let frangesConfig=null;
+  if(configSheet){
+    const cfgData=await llegirPestanya(sheetsId,"CONFIG",tok);
+    frangesConfig=parseFrangesConfig(cfgData);
+  }
+  const franges=frangesConfig||state.franges;
+  // Llegir cada pestanya de mestre
+  for(const sheet of sheets){
+    const title=sheet.properties.title;
+    if(title==="CONFIG"||title==="PLANTILLA_MESTRE") continue;
+    const data=await llegirPestanya(sheetsId,title,tok);
+    const horari=parseSheetMestre(data,franges);
+    if(horari&&Object.keys(horari).length>0){
+      mestres[title.toUpperCase()]=horari;
+    }
+  }
+  return{mestres,franges};
+}
+
+async function llegirPestanya(sheetsId,title,tok){
+  const url="https://sheets.googleapis.com/v4/spreadsheets/"+sheetsId+"/values/"+encodeURIComponent(title)+"!A1:G20";
+  const r=await fetch(url,{headers:{Authorization:"Bearer "+tok}});
+  if(!r.ok) return [];
+  const data=await r.json();
+  return data.values||[];
+}
+
+function parseFrangesConfig(rows){
+  const franges=[];
+  for(let i=2;i<rows.length;i++){
+    const row=rows[i];
+    if(!row||!row[0]||row[0]==="ID") continue;
+    const fid=row[0].trim();
+    const label=row[1]?.trim()||fid;
+    const inici=row[2]?.trim()||"";
+    if(fid) franges.push({id:fid,label:label,inici:inici,fi:""});
+  }
+  return franges.length>0?franges:null;
+}
+
+function parseSheetMestre(rows,franges){
+  if(!rows||rows.length<3) return null;
+  // Fila 0: nom mestre (ignorem)
+  // Fila 1: capçalera FRANJA, Dilluns, Dimarts...
+  // Files 2+: dades
+  const DIES=["Dilluns","Dimarts","Dimecres","Dijous","Divendres"];
+  const header=rows[1]||[];
+  const colDia={};
+  header.forEach((c,i)=>{
+    const d=DIES.find(dia=>c.trim()===dia);
+    if(d) colDia[i]=d;
+  });
+  if(Object.keys(colDia).length===0) return null;
+  const horari={};
+  for(let i=2;i<rows.length;i++){
+    const row=rows[i];
+    if(!row||!row[0]) continue;
+    const fid=row[0].trim();
+    if(!fid||fid==="FRANJA") continue;
+    // Verificar que l'ID existeix a les franges
+    const franjaOk=franges.find(f=>f.id===fid);
+    if(!franjaOk) continue;
+    Object.entries(colDia).forEach(([idx,dia])=>{
+      const val=(row[parseInt(idx)]||"").trim();
+      if(val){
+        if(!horari[dia]) horari[dia]={};
+        horari[dia][fid]=val;
+      }
+    });
+  }
+  return horari;
+}
+
+function extractSheetsId(url){const m=url.match(/\/spreadsheets\/d\/([a-zA-Z0-9_-]+)/);if(m)return m[1];if(/^[a-zA-Z0-9_-]{25,}$/.test(url.trim()))return url.trim();return null;}
+
+const SOROLL=["ESBARJO","ESPAI MIGDIA","CLAUSTRES","COMISSIONS","FORMACIÓ","PER FER","REUNIONS",":-:","16:0","17H","8:30"];
+
+function canonFranja(s,franges){
+  const t=s.trim().replace(/\s/g,"");
+  if(/^9[-\u20138]/.test(t)||t.startsWith("9:00"))return"9h";
+  if(/^10[-\u20138]/.test(t)||t.startsWith("10:00"))return"10h";
+  if(t.startsWith("11:30")||t.startsWith("11.30"))return"11:30h";
+  if(t.startsWith("14:30")||t.startsWith("14.30"))return"14:30h";
+  if(t.startsWith("15:15")||t.startsWith("15.15"))return"15:15h";
+  for(const f of franges){const i=f.inici.replace(":","").replace(/^0/,"");if(t.startsWith(f.inici)||t.startsWith(i))return f.id;}
+  return null;
+}
+const isTableRow=l=>l.trim().startsWith("|");
+const cleanCell=s=>s.replace(/\\\*/g,"*").replace(/\\/g,"").trim();
+function isSoroll(s){const u=s.toUpperCase().replace(/\s/g,"");return["ESBARJO","ESPAIMIGDIA","CLAUSTRES","COMISSIONS","FORMACIO","REUNIONS"].some(k=>u.includes(k));}
+function parseHoraris(text,franges=FRANGES_DEFAULT){
+  const m={};
+  const blocks=text.replace(/\r\n/g,'\n').replace(/\r/g,'\n').trim().split(/\n{2,}/);
+  for(const block of blocks){
+    const lines=block.trim().split("\n").filter(l=>l.trim());
+    if(!lines.length)continue;
+    const hasTab=lines.some(l=>l.includes("\t"));
+    if(hasTab){
+      // Format tabuladors (Google Docs exportat com a text pla)
+      // Cada taula comença amb una línia de capçalera tipus "Horari tutora X  Nom Cognom  Any"
+      // Buscar el nom del mestre a la primera línia
+      // Netejar \r (Windows line endings)
+      const linesNet=lines.map(l=>l.replace(/\r/g,""));
+      // Buscar nom del mestre a les primeres 3 línies (pot estar a la 2a línia)
+      let nom=null;
+      for(let li=0;li<Math.min(3,linesNet.length);li++){
+        for(const cell of linesNet[li].split("\t").map(s=>s.trim())){
+          const match=cell.match(/^([A-Z\u00C0-\u00DC][a-z\u00E0-\u00FC]+(?:\s+[A-Z\u00C0-\u00DC][a-z\u00E0-\u00FC]+)+)$/);
+          if(match){nom=match[1].toUpperCase();break;}
+        }
+        if(nom)break;
+      }
+      // Si no hi ha nom de persona, és l'horari del grup -> ignorar
+      if(!nom)continue;
+      const linesN=linesNet;
+      if(m[nom])continue;
+      m[nom]={};
+      let headerIdx=-1;const colDia={};
+      for(let i=0;i<linesN.length;i++){
+        const u=linesN[i].toUpperCase();
+        if(u.includes("DILLUNS")||u.includes("DIMARTS")){
+          headerIdx=i;
+          linesN[i].split("\t").map(s=>s.trim()).forEach((c,idx)=>{
+            const d=DIES.find(dia=>c.toUpperCase().includes(dia.toUpperCase()));
+            if(d)colDia[idx]=d;
+          });
+          break;
+        }
+      }
+      if(headerIdx<0)continue;
+      for(let i=headerIdx+1;i<linesN.length;i++){
+        if(isSoroll(linesN[i]))continue;
+        const cells=linesN[i].split("\t").map(s=>s.trim());
+        const franja=canonFranja(cells[0]||"",franges);
+        if(!franja)continue;
+        cells.forEach((c,idx)=>{
+          if(colDia[idx]&&c&&c!=="-"&&!isSoroll(c)){
+            if(!m[nom][colDia[idx]])m[nom][colDia[idx]]={};
+            m[nom][colDia[idx]][franja]=c;
+          }
+        });
+      }
+      continue;
+    }
+    // Format pipe (|)
+    const tableLines=lines.filter(l=>isTableRow(l));
+    if(tableLines.length>=3){
+      const nomLine=lines.find(l=>!isTableRow(l)&&l.trim().length>2)||"";
+      const nomMatch=nomLine.match(/([A-Z\u00C0-\u00DC][a-z\u00E0-\u00FC]+(?:\s+[A-Z\u00C0-\u00DC][a-z\u00E0-\u00FC]+)+)/);
+      if(!nomMatch)continue;
+      const nom=nomMatch[1].toUpperCase();
+      if(m[nom])continue;
+      m[nom]={};
+      const headerIdx=tableLines.findIndex(l=>{const u=l.toUpperCase();return u.includes("DILLUNS")||u.includes("DIMARTS");});
+      if(headerIdx<0)continue;
+      const headerCells=tableLines[headerIdx].split("|").map(cleanCell);
+      const colDia={};
+      headerCells.forEach((c,i)=>{const d=DIES.find(dia=>c.toUpperCase().includes(dia.toUpperCase()));if(d)colDia[i]=d;});
+      for(const row of tableLines.slice(headerIdx+2)){
+        if(isSoroll(row))continue;
+        const cells=row.split("|").map(cleanCell);
+        const franja=canonFranja(cells[0]||"",franges);
+        if(!franja)continue;
+        cells.forEach((c,i)=>{if(colDia[i]&&c&&c!=="-"&&!isSoroll(c)){if(!m[nom][colDia[i]])m[nom][colDia[i]]={};m[nom][colDia[i]][franja]=c;}});
+      }
+      continue;
+    }
+    const nom=lines[0].trim().toUpperCase();
+    if(!nom||nom.length<2)continue;
+    if(m[nom])continue;
+    m[nom]={};
+    for(let i=1;i<lines.length;i++){
+      const line=lines[i].trim();
+      const dia=DIES.find(d=>line.startsWith(d));
+      if(!dia)continue;
+      const after=line.slice(dia.length).replace(/^:/,"").trim();
+      if(!m[nom][dia])m[nom][dia]={};
+      for(const slot of after.split("|").map(s=>s.trim())){
+        const fids=[...franges].map(f=>f.id).sort((a,b)=>b.length-a.length);
+        const f=fids.find(f=>slot.startsWith(f));
+        if(f)m[nom][dia][f]=slot.slice(f.length).trim();
+      }
+    }
+  }
+  return m;
+}
+
+function normalitza(s){return s.toUpperCase().normalize("NFD").replace(/[\u0300-\u036f]/g,"").trim();}
+const NO_CAL_KW=["T.P.","TP.","T.P ","TREBALL PERSONAL","CAEI","ESBARJO","SUPORT","COORDINACIÓ","COORDINACIO","REUNIÓ","REUNIO","CÀRREC","CARREC","DOBLE:"];
+const NO_DISP_KW=["CAEI","ESBARJO","PISCINA","COORDINACIÓ","COORDINACIO","REUNIÓ","REUNIO","CÀRREC","CARREC","DOBLE:"];
+const TP_KW=["T.P.","TP.","T.P ","TREBALL PERSONAL"];
+function calSuplir(act){if(!act)return false;const u=normalitza(act);if(u==="PISCINA")return true;return!NO_CAL_KW.some(k=>u===normalitza(k)||u.startsWith(normalitza(k)));}
+function tipusSuplent(act){
+  if(!act)return"LLIURE";const u=normalitza(act);
+  if(u.startsWith("DOBLE:"))return"NO_DISPONIBLE";
+  if(NO_DISP_KW.some(k=>u===normalitza(k)||u.startsWith(normalitza(k))))return"NO_DISPONIBLE";
+  if(TP_KW.some(k=>u===normalitza(k)||u.startsWith(normalitza(k))))return"TP";
+  // +Nom significa que el mestre TÉ CLASSE i el +Nom hi és de suport -> NO disponible
+  if(act.includes("+")||act.includes("*"))return"CLASSE";
+  if(u.startsWith("SUPORT"))return"SUPORT_GENERAL";
+  return"CLASSE";
+}
+function actLabel(act){if(!act)return"—";if(normalitza(act).startsWith("DOBLE:"))return act.slice(6)+" (doble)";return act;}
+function cercaBase(mestres,absent,dia,franja,ocupats=new Set()){
+  const au=absent.toUpperCase();
+  const actAbsent=mestres[au]?.[dia]?.[franja]||"";
+  if(!calSuplir(actAbsent))return[{nom:null,p:-1,motiu:"No cal — tenia "+actLabel(actAbsent)}];
+  const p1=[],p2=[],p3=[];
+  for(const[nom,horari]of Object.entries(mestres)){
+    if(nom===au||ocupats.has(nom))continue;
+    const act=horari?.[dia]?.[franja]||"";
+    const tipus=tipusSuplent(act);
+    // P1: mestre que té "+NomAbsent" a la seva activitat (és de suport a l'aula de l'absent)
+    // Buscar si l'activitat d'aquest mestre conté +inicialNomAbsent
+    const nomCurt=au.split(" ")[0]; // primer cognom/nom
+    if((act.includes("+")&&(act.toUpperCase().includes("+"+nomCurt)||act.toUpperCase().includes("+ "+nomCurt)))){
+      p1.push({nom,act,p:1,motiu:"Suport natural — ja era a l'aula"});continue;
+    }
+    if(tipus==="NO_DISPONIBLE"||tipus==="CLASSE"||tipus==="LLIURE")continue;
+    if(tipus==="SUPORT_GENERAL"){p2.push({nom,act,p:2,motiu:"Fa suport en una altra aula"});continue;}
+    if(tipus==="TP")p3.push({nom,act,p:3,motiu:"⚠ Trenca T.P."});
+  }
+  const ord=(a,b)=>a.nom.localeCompare(b.nom);
+  return[...p1.sort(ord),...p2.sort(ord),...p3.sort(ord)];
+}
+function assignacioMultiple(mestres,totsAbsents,dia,franjesSeleccionades,absentPerFranja,frangesConfig=FRANGES_DEFAULT){
+  const resultat={};
+  const franjesOrdenades=[...franjesSeleccionades].sort((a,b)=>frangesConfig.findIndex(f=>f.id===a)-frangesConfig.findIndex(f=>f.id===b));
+  const continuitat=new Map();
+  for(const franja of franjesOrdenades){
+    const absentsAqui=absentPerFranja?.[franja]||[];
+    if(!absentsAqui.length)continue;
+    const ocupats=new Set(totsAbsents.map(a=>a.toUpperCase()));
+    const assignacions=[];
+    const ambInfo=absentsAqui.map(absent=>{
+      const au=absent.toUpperCase();
+      const actAbsent=mestres[au]?.[dia]?.[franja]||"";
+      const cal=calSuplir(actAbsent);
+      const candidats=cal?cercaBase(mestres,absent,dia,franja,new Set()).filter(c=>c.nom):[];
+      return{absent,au,actAbsent,cal,candidats};
+    });
+    for(const{absent,actAbsent}of ambInfo.filter(a=>!a.cal)){
+      assignacions.push({absent,suplent:null,act:actAbsent,p:-1,motiu:"No cal — tenia "+actLabel(actAbsent)});
+    }
+    const calList=ambInfo.filter(a=>a.cal);
+    const assignatsCont=new Set();
+    for(const{absent,au}of calList){
+      const prev=continuitat.get(au);
+      if(!prev||ocupats.has(prev))continue;
+      const actPrev=mestres[prev]?.[dia]?.[franja]||"";
+      const tipus=tipusSuplent(actPrev);
+      if(tipus==="SUPORT_GENERAL"||tipus==="SUPORT_NATURAL"){
+        ocupats.add(prev);assignatsCont.add(au);continuitat.set(au,prev);
+        assignacions.push({absent,suplent:prev,act:actPrev,p:2,motiu:"Continuïtat"});
+      }
+    }
+    const resta=calList.filter(a=>!assignatsCont.has(a.au)).sort((a,b)=>a.candidats.length-b.candidats.length);
+    for(const{absent,au,candidats}of resta){
+      const disp=candidats.filter(c=>!ocupats.has(c.nom));
+      if(disp.length>0){
+        const millor=disp[0];ocupats.add(millor.nom);continuitat.set(au,millor.nom);
+        assignacions.push({absent,suplent:millor.nom,act:millor.act,p:millor.p,motiu:millor.motiu});
+      } else {
+        assignacions.push({absent,suplent:null,act:"",p:0,motiu:"⚠ Sense suplent disponible"});
+      }
+    }
+    resultat[franja]=assignacions;
+  }
+  return resultat;
+}
+
+const cap=s=>s?s.charAt(0)+s.slice(1).toLowerCase():"";
+const avuiDia=()=>{const d=new Date().getDay();return DIES[d===0||d===6?0:d-1];};
+const P_CFG={"-1":{bg:"#f8fafc",border:"#e2e8f0",pill:"#94a3b8"},"0":{bg:"#fef2f2",border:"#fca5a5",pill:"#ef4444"},"1":{bg:"#f0fdf4",border:"#4ade80",pill:"#22c55e"},"2":{bg:"#fffbeb",border:"#fbbf24",pill:"#f59e0b"},"3":{bg:"#fef2f2",border:"#fca5a5",pill:"#ef4444"}};
+const P_LABELS={"-1":"No cal","0":"Sense suplent","1":"P1 Suport Natural","2":"P2 Suport/Co-doc.","3":"P3 Últim recurs"};
+
+const ETAPES=[
+  {id:"infantil",label:"Infantil",icon:"🌱",color:"#7C3AED"},
+  {id:"primaria",label:"Primària",icon:"📚",color:"#2563EB"},
+  {id:"secundaria",label:"Secundària",icon:"🎓",color:"#0F766E"},
+];
+let state={page:"cercar",loggedIn:false,user:null,etapa:"primaria",mestres:{},franges:FRANGES_DEFAULT,fitxersCarregats:[],driveUrl:"",driveEstat:null,driveMsg:"",isLoadingDrive:false,registre:[],diaC:avuiDia(),absentsAmbFranges:[],resultatsMultiple:null,canvisManuals:{},diaAvui:avuiDia(),subpaginaAvui:"suplencies",criterisText:"",criterisGuardats:false,geminiKey:"",geminiActiu:false,geminiEstat:null};
+function setState(patch){Object.assign(state,patch);render();}
+
+function initGoogleLogin(){
+  if(!window.google){setTimeout(initGoogleLogin,500);return;}
+  google.accounts.id.initialize({client_id:GOOGLE_CLIENT_ID,callback:handleCredentialResponse,auto_select:false,cancel_on_tap_outside:false});
+  if(!state.loggedIn)render();
+}
+function handleCredentialResponse(response){
+  const payload=parseJwt(response.credential);
+  currentUser={email:payload.email,name:payload.name,picture:payload.picture,accessToken:null};
+  loadUserData();
+  setState({loggedIn:true,user:currentUser});
+}
+function parseJwt(token){const base64=token.split(".")[1].replace(/-/g,"+").replace(/_/g,"/");return JSON.parse(atob(base64));}
+function loginWithGoogle(){
+  if(!window.google){alert("Google no carregat, torna-ho a intentar.");return;}
+  // Usar ux_mode redirect per evitar problemes COOP amb GitHub Pages
+  const client = google.accounts.oauth2.initTokenClient({
+    client_id:GOOGLE_CLIENT_ID,
+    scope:"email profile https://www.googleapis.com/auth/spreadsheets.readonly",
+    ux_mode:"popup",
+    callback:(tokenResponse)=>{
+      if(tokenResponse.access_token){
+        currentUser={...currentUser,accessToken:tokenResponse.access_token};
+        state.user=currentUser;
+        localStorage.setItem("sup_accessToken",tokenResponse.access_token);
+        render();
+      }
+    }
+  });
+  client.requestAccessToken({prompt:"consent"});
+}
+function logout(){if(window.google)google.accounts.id.disableAutoSelect();localStorage.removeItem("sup_accessToken");currentUser=null;setState({loggedIn:false,user:null,mestres:{},registre:[],resultatsMultiple:null,criterisText:"",criterisGuardats:false,geminiKey:"",geminiActiu:false,etapa:"primaria"});}
+function loadUserData(){
+  // Carregar accessToken (compartit entre etapes)
+  const at=localStorage.getItem("sup_accessToken");
+  if(at&&currentUser)currentUser.accessToken=at;
+  // Carregar dades per etapa actual
+  const h=sGet("horaris");const r=sGet("registre");const cr=sGet("criteris");
+  if(h?.mestres){state.mestres=h.mestres;if(h.franges)state.franges=h.franges;}
+  else if(h?.text){state.mestres=parseHoraris(h.text,state.franges);}
+  else{state.mestres={};state.franges=FRANGES_DEFAULT;}
+  if(r?.llista)state.registre=r.llista;else state.registre=[];
+  if(cr?.text){state.criterisText=cr.text;state.criterisGuardats=true;}
+  else{state.criterisText="";state.criterisGuardats=false;}
+  if(cr?.geminiKey){state.geminiKey=cr.geminiKey;state.geminiActiu=true;}
+  else{state.geminiKey="";state.geminiActiu=false;}
+  // Carregar URL del Sheets per aquesta etapa
+  const urlGuardada=sGet("sheetsUrl");
+  if(urlGuardada)state.driveUrl=urlGuardada;
+  else state.driveUrl="";
+}
+function canviarEtapa(etapaId){
+  state.etapa=etapaId;
+  state.absentsAmbFranges=[];
+  state.resultatsMultiple=null;
+  state.canvisManuals={};
+  state.fitxersCarregats=[];
+  state.driveEstat=null;
+  state.driveMsg="";
+  loadUserData();
+  render();
+}
+
+async function renovarToken(){
+  return new Promise((resolve,reject)=>{
+    if(!window.google){reject(new Error("Google no carregat"));return;}
+    google.accounts.oauth2.initTokenClient({
+      client_id:GOOGLE_CLIENT_ID,
+      scope:"email profile https://www.googleapis.com/auth/spreadsheets.readonly",
+      callback:(tokenResponse)=>{
+        if(tokenResponse.access_token){
+          currentUser={...currentUser,accessToken:tokenResponse.access_token};
+          state.user=currentUser;
+          localStorage.setItem("sup_accessToken",tokenResponse.access_token);
+          resolve(tokenResponse.access_token);
+        } else {
+          reject(new Error("No s'ha pogut renovar el token"));
+        }
+      },
+    }).requestAccessToken({prompt:"consent"});
+  });
+}
+
+async function importarDrive(){
+  if(!currentUser?.accessToken){loginWithGoogle();return;}
+  const sheetsId=extractSheetsId(state.driveUrl);
+  if(!sheetsId){setState({driveEstat:"error",driveMsg:"Enllaç no reconegut. Ha de ser un enllaç de Google Sheets."});return;}
+  setState({isLoadingDrive:true,driveEstat:null,driveMsg:""});
+  try{
+    let token=currentUser.accessToken;
+    let resultat;
+    try{
+      resultat=await llegirSheets(sheetsId,token);
+    } catch(e){
+      if(e.message.includes("401")){
+        token=await renovarToken();
+        resultat=await llegirSheets(sheetsId,token);
+      } else throw e;
+    }
+    const{mestres:nous,franges}=resultat;
+    const n=Object.keys(nous).length;
+    if(!n)throw new Error("No s'ha pogut llegir cap mestre del Sheets.");
+    const mestres={...nous};
+    sSet("horaris",{mestres,franges});
+    setState({mestres,franges,fitxersCarregats:Object.keys(nous).map(n=>({nom:n,ok:true})),driveEstat:"ok",driveMsg:n+" mestres importats correctament!",isLoadingDrive:false});
+  }catch(e){setState({driveEstat:"error",driveMsg:e.message,isLoadingDrive:false});}
+}
+
+function render(){
+  const root=document.getElementById("root");
+  root.innerHTML=buildHTML();
+  if(!state.loggedIn&&window.google){
+    setTimeout(()=>{
+      const btn=document.getElementById("g-signin-btn");
+      if(btn)google.accounts.id.renderButton(btn,{type:"standard",shape:"pill",theme:"outline",text:"signin_with",size:"large",locale:"ca"});
+    },100);
+  }
+}
+function buildHTML(){
+  if(!state.loggedIn)return buildLoginPage();
+  return'<div style="font-family:\'Segoe UI\',system-ui,sans-serif;max-width:480px;margin:0 auto;min-height:100vh;display:flex;flex-direction:column;">'+buildHeader()+buildEtapes()+buildNav()+'<div style="flex:1;overflow:auto;">'+(state.page==="cercar"?buildCercar():"")+(state.page==="avui"?buildAvui():"")+(state.page==="criteris"?buildCriteris():"")+(state.page==="horaris"?buildHoraris():"")+' </div></div>';
+}
+function buildLoginPage(){
+  const googleCarregat=!!window.google;
+  return'<div style="min-height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:2rem;background:#f8fafc;"><div style="background:white;border-radius:1.5rem;padding:2.5rem 2rem;width:100%;max-width:380px;box-shadow:0 4px 24px rgba(0,0,0,0.08);text-align:center;"><div style="width:64px;height:64px;background:#2563eb;border-radius:1rem;display:flex;align-items:center;justify-content:center;margin:0 auto 1.5rem;font-size:1.5rem;font-weight:900;color:white;">S</div><h1 style="font-size:1.4rem;font-weight:700;color:#1e293b;margin-bottom:0.5rem;">Cobrir Suplències</h1><p style="color:#64748b;font-size:0.875rem;margin-bottom:2rem;line-height:1.5;">Entra amb el compte de l\'escola per accedir als horaris del teu centre.</p>'
+  +(googleCarregat
+    ?'<div id="g-signin-btn" style="display:flex;justify-content:center;margin-bottom:0.75rem;"></div><div style="margin:0.5rem 0;color:#cbd5e1;font-size:0.75rem;">o bé</div><button onclick="loginWithGoogle()" style="width:100%;background:white;border:1px solid #e2e8f0;border-radius:9999px;padding:0.75rem 1.5rem;font-size:0.9rem;font-weight:600;color:#374151;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:0.75rem;"><svg width="18" height="18" viewBox="0 0 48 48"><path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.08 17.74 9.5 24 9.5z"/><path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"/><path fill="#FBBC05" d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"/><path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-3.58-13.46-8.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"/></svg>Continuar amb Google</button>'
+    :'<button onclick="loginWithGoogle()" style="width:100%;background:white;border:1px solid #e2e8f0;border-radius:9999px;padding:0.75rem 1.5rem;font-size:0.9rem;font-weight:600;color:#374151;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:0.75rem;"><svg width="18" height="18" viewBox="0 0 48 48"><path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.08 17.74 9.5 24 9.5z"/><path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"/><path fill="#FBBC05" d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"/><path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-3.58-13.46-8.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"/></svg>Continuar amb Google</button><p style="color:#f59e0b;font-size:0.7rem;margin-top:0.75rem;">Carregant Google... si no funciona recarrega la pàgina.</p>')
+  +'<p style="color:#94a3b8;font-size:0.75rem;line-height:1.5;margin-top:1rem;">Cada escola accedeix de forma independent. Les dades no es comparteixen entre centres.</p></div></div>';
+}
+function buildEtapes(){
+  var html='<div style="background:#1e293b;padding:0.5rem 1.25rem;display:flex;gap:0.375rem;overflow-x:auto;flex-shrink:0;">';
+  for(var i=0;i<ETAPES.length;i++){
+    var e=ETAPES[i];
+    var bg=state.etapa===e.id?e.color:"#334155";
+    html+='<button onclick="window.canviarEtapa(\''+e.id+'\')" style="flex-shrink:0;padding:0.375rem 0.875rem;border-radius:9999px;font-size:0.75rem;font-weight:700;border:none;cursor:pointer;background:'+bg+';color:white;display:flex;align-items:center;gap:0.25rem;"><span>'+e.icon+'</span><span>'+e.label+'</span></button>';
+  }
+  html+='</div>';
+  return html;
+}
+
+function buildHeader(){
+  const nomsMestres=Object.keys(state.mestres);
+  const registreAvui=state.registre.filter(r=>r.dia===state.diaAvui);
+  return'<div style="background:#0f172a;color:white;padding:0.875rem 1.25rem;display:flex;align-items:center;justify-content:space-between;flex-shrink:0;"><div style="display:flex;align-items:center;gap:0.75rem;"><div style="width:2rem;height:2rem;background:#2563eb;border-radius:0.5rem;display:flex;align-items:center;justify-content:center;font-weight:900;font-size:0.875rem;">S</div><div><div style="font-weight:700;font-size:0.9rem;">Cobrir Suplències</div><div style="color:#94a3b8;font-size:0.7rem;">'+nomsMestres.length+' mestres · '+(state.user?.email||"")+'</div></div></div><div style="display:flex;align-items:center;gap:0.5rem;">'+(registreAvui.length>0?'<span style="background:#2563eb;color:white;font-size:0.7rem;font-weight:700;padding:0.25rem 0.625rem;border-radius:9999px;">'+registreAvui.length+' avui</span>':"")+(state.user?.picture?'<img src="'+state.user.picture+'" style="width:2rem;height:2rem;border-radius:50%;cursor:pointer;" onclick="logout()" title="Tancar sessió">':"")+'</div></div>';
+}
+function buildNav(){
+  const nav=[{key:"cercar",icon:"🔍",label:"Suplències"},{key:"avui",icon:"📋",label:"Avui"},{key:"criteris",icon:"⚙️",label:"Criteris"},{key:"horaris",icon:"📂",label:"Horaris"}];
+  return'<div style="background:white;border-bottom:1px solid #e2e8f0;display:flex;flex-shrink:0;">'+nav.map(n=>'<button onclick="setPage(\''+n.key+'\')" style="flex:1;display:flex;flex-direction:column;align-items:center;padding:0.625rem 0;gap:0.125rem;border:none;border-bottom:2px solid '+(state.page===n.key?"#3b82f6":"transparent")+';background:none;cursor:pointer;font-size:0.7rem;font-weight:600;color:'+(state.page===n.key?"#3b82f6":"#94a3b8")+';"><span style="font-size:1.1rem;line-height:1;">'+n.icon+'</span><span>'+n.label+'</span></button>').join("")+'</div>';
+}
+function buildCercar(){
+  const nomsMestres=Object.keys(state.mestres).sort();
+  const potCalcular=state.absentsAmbFranges.some(a=>a.franges.length>0);
+  return'<div style="padding:1rem;display:flex;flex-direction:column;gap:1rem;">'
+    +(!nomsMestres.length?'<div style="background:#fffbeb;border:1px solid #fbbf24;border-radius:1rem;padding:1rem;text-align:center;"><p style="color:#92400e;font-weight:600;font-size:0.875rem;">⚠ No hi ha horaris carregats</p><button onclick="setPage(\'horaris\')" style="color:#d97706;font-size:0.75rem;text-decoration:underline;background:none;border:none;cursor:pointer;margin-top:0.25rem;">Ves a Horaris</button></div>':"")
+    +'<div style="background:white;border-radius:1rem;border:1px solid #e2e8f0;overflow:hidden;"><div style="padding:1rem 1.25rem;border-bottom:1px solid #f1f5f9;"><h2 style="font-weight:700;color:#1e293b;font-size:1rem;">Qui falta avui?</h2><p style="font-size:0.75rem;color:#94a3b8;margin-top:0.125rem;">Selecciona mestres i les seves franges</p></div>'
+    +'<div style="padding:1.25rem;display:flex;flex-direction:column;gap:1rem;">'
+    +'<div><label style="font-size:0.7rem;font-weight:700;color:#64748b;text-transform:uppercase;letter-spacing:0.05em;display:block;margin-bottom:0.375rem;">Dia</label><div style="display:flex;gap:0.375rem;">'+DIES.map((d,i)=>'<button onclick="setDia(\''+d+'\')" style="flex:1;padding:0.5rem 0;border-radius:0.625rem;font-size:0.75rem;font-weight:700;border:none;cursor:pointer;background:'+(state.diaC===d?"#2563eb":"#f1f5f9")+';color:'+(state.diaC===d?"white":"#64748b")+';">'+DIES_CURTS[i]+'</button>').join("")+'</div></div>'
+    +'<div><label style="font-size:0.7rem;font-weight:700;color:#64748b;text-transform:uppercase;letter-spacing:0.05em;display:block;margin-bottom:0.375rem;">Mestres absents'+(state.absentsAmbFranges.length>0?' <span style="background:#dbeafe;color:#2563eb;padding:0.125rem 0.5rem;border-radius:9999px;font-size:0.7rem;margin-left:0.5rem;">'+state.absentsAmbFranges.length+'</span>':"")+'</label>'
+    +'<select onchange="afegirAbsent(this.value);this.value=\'\';" style="width:100%;border:1px solid #e2e8f0;border-radius:0.75rem;padding:0.625rem 0.75rem;font-size:0.875rem;color:#374151;background:#f8fafc;margin-bottom:0.75rem;"><option value="">+ Afegir mestre absent...</option>'+nomsMestres.filter(n=>!state.absentsAmbFranges.find(a=>a.nom===n)).map(n=>'<option value="'+n+'">'+cap(n)+'</option>').join("")+'</select>'
+    +state.absentsAmbFranges.map(({nom,franges:fs})=>'<div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:0.75rem;padding:0.75rem;margin-bottom:0.5rem;"><div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:0.5rem;"><span style="font-weight:700;color:#1e293b;font-size:0.875rem;">'+cap(nom)+'</span><div style="display:flex;gap:0.5rem;align-items:center;"><button onclick="marcarTotElDia(\''+nom+'\')" style="font-size:0.7rem;color:#2563eb;font-weight:600;background:none;border:none;cursor:pointer;">Tot el dia</button><button onclick="eliminarAbsent(\''+nom+'\')" style="color:#cbd5e1;font-size:1.25rem;background:none;border:none;cursor:pointer;line-height:1;">×</button></div></div><div style="display:flex;flex-wrap:wrap;gap:0.375rem;">'+state.franges.map(f=>'<button onclick="toggleFranja(\''+nom+'\',\''+f.id+'\')" style="padding:0.375rem 0.625rem;border-radius:0.5rem;font-size:0.7rem;font-weight:700;cursor:pointer;border:1px solid '+(fs.includes(f.id)?"#2563eb":"#e2e8f0")+';background:'+(fs.includes(f.id)?"#2563eb":"white")+';color:'+(fs.includes(f.id)?"white":"#64748b")+';">'+f.label+'</button>').join("")+'</div>'+(fs.length===0?'<p style="font-size:0.7rem;color:#f59e0b;margin-top:0.375rem;">Selecciona les franges</p>':'')+'</div>').join("")
+    +'</div>'
+    +'<button onclick="handleCerca()" '+((!potCalcular||!nomsMestres.length)?"disabled":"")+' style="width:100%;background:'+(potCalcular&&nomsMestres.length?"#2563eb":"#e2e8f0")+';color:'+(potCalcular&&nomsMestres.length?"white":"#94a3b8")+';font-weight:700;padding:0.75rem;border-radius:0.75rem;border:none;cursor:'+(potCalcular?"pointer":"default")+';font-size:0.9rem;">🔍 Calcular assignació</button>'
+    +'</div></div>'
+    +(state.resultatsMultiple?buildResultats():"")
+    +'</div>';
+}
+function buildResultats(){
+  const entries=Object.entries(state.resultatsMultiple).sort((a,b)=>state.franges.findIndex(f=>f.id===a[0])-state.franges.findIndex(f=>f.id===b[0]));
+  return'<div style="display:flex;align-items:center;justify-content:space-between;padding:0 0.25rem;"><p style="font-size:0.875rem;font-weight:700;color:#374151;">Proposta d\'assignació</p><button onclick="assignarTot()" style="background:#16a34a;color:white;font-size:0.75rem;font-weight:700;padding:0.375rem 0.75rem;border-radius:0.5rem;border:none;cursor:pointer;">✓ Assignar tot</button></div>'
+  +entries.map(([franja,assignacions])=>{
+    return'<div style="background:white;border-radius:1rem;border:1px solid #e2e8f0;overflow:hidden;"><div style="padding:0.625rem 1rem;background:#f8fafc;border-bottom:1px solid #f1f5f9;display:flex;align-items:center;justify-content:space-between;"><span style="font-weight:700;color:#374151;font-size:0.875rem;">'+(state.franges.find(f=>f.id===franja)?.label||franja)+'</span><span style="font-size:0.7rem;color:#94a3b8;">'+assignacions.filter(a=>a.suplent||a.p===-1).length+"/"+assignacions.length+'</span></div><div style="padding:0.75rem;display:flex;flex-direction:column;gap:0.5rem;">'
+    +assignacions.map(a=>{
+      const noCal=a.p===-1;
+      const p=noCal?-1:Math.min(a.p||0,2);
+      const c=P_CFG[String(p)]||P_CFG["0"];
+      const clau=franja+"__"+a.absent;
+      const suplentFinal=state.canvisManuals[clau]||a.suplent;
+      const nomsMestres=Object.keys(state.mestres).sort();
+      const totsAbsentsUp=new Set(state.absentsAmbFranges.map(x=>x.nom.toUpperCase()));
+      const candidats=!noCal?nomsMestres.filter(nom=>{if(totsAbsentsUp.has(nom))return false;const act=state.mestres[nom]?.[state.diaC]?.[franja]||"";const t=tipusSuplent(act);return t==="SUPORT_NATURAL"||t==="SUPORT_GENERAL"||t==="TP";}):[];
+      return'<div style="border-radius:0.75rem;border:1px solid '+c.border+';padding:0.75rem;background:'+c.bg+';"><div style="display:flex;align-items:start;gap:0.75rem;"><div style="width:2rem;height:2rem;border-radius:0.5rem;background:'+c.pill+';color:white;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:0.875rem;flex-shrink:0;">'+(noCal?"—":p===1?"★":p===2?"◆":"⚠")+'</div><div style="flex:1;min-width:0;"><div style="font-size:0.75rem;color:#64748b;">Absent: <span style="font-weight:700;color:#1e293b;">'+cap(a.absent)+'</span></div><div style="font-size:0.7rem;color:#94a3b8;margin-top:0.125rem;">Tenia: '+actLabel((state.mestres[a.absent.toUpperCase()]?.[state.diaC]?.[franja])||"—")+'</div>'+(noCal?'<p style="font-size:0.75rem;color:#64748b;font-weight:600;margin-top:0.375rem;">✓ '+a.motiu+'</p>'
+      :'<div style="display:flex;align-items:center;gap:0.5rem;margin-top:0.375rem;"><span style="font-size:0.7rem;color:#64748b;flex-shrink:0;">Suplent:</span><select onchange="setCanviManual(\''+clau+'\',this.value)" style="flex:1;font-size:0.7rem;border:1px solid #e2e8f0;border-radius:0.5rem;padding:0.25rem 0.5rem;background:white;color:'+(p===1?"#16a34a":p===2?"#d97706":"#dc2626")+';font-weight:600;"><option value="">— Sense suplent —</option>'+(suplentFinal&&!candidats.includes(suplentFinal)?'<option value="'+suplentFinal+'" selected>'+cap(suplentFinal)+' ★</option>':"")+candidats.map(n=>'<option value="'+n+'" '+(n===suplentFinal?"selected":"")+'>'+cap(n)+'</option>').join("")+'</select></div><div style="display:flex;align-items:center;justify-content:space-between;margin-top:0.375rem;"><div>'+(suplentFinal?'<span style="font-size:0.65rem;font-weight:700;padding:0.125rem 0.5rem;border-radius:9999px;background:'+c.pill+';color:white;">'+(P_LABELS[String(p)]||"")+'</span>':'')+'</div>'+(suplentFinal?'<button onclick="assignarUn(\''+franja+'\',\''+a.absent+'\')" style="background:#16a34a;color:white;font-size:0.7rem;font-weight:700;padding:0.375rem 0.625rem;border-radius:0.5rem;border:none;cursor:pointer;flex-shrink:0;">✓ Assignar</button>':"")+' </div>'+(suplentFinal?"":"<p style='font-size:0.7rem;color:#dc2626;font-weight:600;margin-top:0.25rem;'>⚠ Sense suplent disponible</p>"))+'</div></div></div>';
+    }).join("")+'</div></div>';
+  }).join("");
+}
+function buildAvui(){
+  const registreAvui=state.registre.filter(r=>r.dia===state.diaAvui);
+  const respostaAvui=state.franges.map(({id:franja})=>{
+    const suport=[];const tp=[];
+    for(const[nom,horari]of Object.entries(state.mestres)){const act=horari?.[state.diaAvui]?.[franja]||"";const t=tipusSuplent(act);if(t==="SUPORT_GENERAL")suport.push({nom,act,tipus:"suport"});else if(t==="TP")tp.push({nom,act,tipus:"tp"});}
+    return{franja,suport,tp};
+  });
+  const estadistiques=Object.keys(state.mestres).sort().map(nom=>({nom,total:state.registre.filter(r=>r.suplent===nom).length})).filter(e=>e.total>0).sort((a,b)=>b.total-a.total);
+  return'<div style="padding:1rem;display:flex;flex-direction:column;gap:1rem;">'
+  +'<div style="display:flex;gap:0.5rem;background:white;border-radius:1rem;border:1px solid #e2e8f0;padding:0.375rem;">'
+  +[{key:"suplencies",label:"📋 Suplències"},{key:"estadistiques",label:"📊 Estadístiques"}].map(s=>'<button onclick="setSubpagina(\''+s.key+'\')" style="flex:1;padding:0.5rem;border-radius:0.75rem;font-size:0.75rem;font-weight:700;border:none;cursor:pointer;background:'+(state.subpaginaAvui===s.key?"#0f172a":"transparent")+';color:'+(state.subpaginaAvui===s.key?"white":"#64748b")+';">'+s.label+'</button>').join("")
+  +'</div>'
+  +(state.subpaginaAvui==="suplencies"
+  ?'<div style="background:white;border-radius:1rem;border:1px solid #e2e8f0;padding:1rem;"><label style="font-size:0.7rem;font-weight:700;color:#64748b;text-transform:uppercase;letter-spacing:0.05em;display:block;margin-bottom:0.5rem;">Dia</label><div style="display:flex;gap:0.375rem;">'+DIES.map((d,i)=>'<button onclick="setDiaAvui(\''+d+'\')" style="flex:1;padding:0.5rem 0;border-radius:0.625rem;font-size:0.75rem;font-weight:700;border:none;cursor:pointer;background:'+(state.diaAvui===d?"#0f172a":"#f1f5f9")+';color:'+(state.diaAvui===d?"white":"#64748b")+';">'+DIES_CURTS[i]+'</button>').join("")+'</div></div>'
+  +(registreAvui.length>0
+  ?'<div style="background:white;border-radius:1rem;border:1px solid #e2e8f0;overflow:hidden;"><div style="padding:0.75rem 1.25rem;border-bottom:1px solid #f1f5f9;display:flex;align-items:center;justify-content:space-between;"><h3 style="font-weight:700;color:#374151;font-size:0.875rem;">Suplències assignades</h3><span style="background:#0f172a;color:white;font-size:0.7rem;font-weight:700;padding:0.125rem 0.5rem;border-radius:9999px;">'+registreAvui.length+'</span></div><div>'+registreAvui.map(r=>{const p=Math.min(r.prioritat||2,2);const c=P_CFG[String(p)];return'<div style="padding:0.75rem 1.25rem;border-bottom:1px solid #f8fafc;display:flex;align-items:start;gap:0.75rem;"><div style="width:0.5rem;height:0.5rem;border-radius:50%;background:'+c.pill+';margin-top:0.375rem;flex-shrink:0;"></div><div style="flex:1;"><p style="font-size:0.875rem;font-weight:700;color:#1e293b;">'+cap(r.absent)+' → '+cap(r.suplent)+'</p><p style="font-size:0.7rem;color:#94a3b8;">'+(state.franges.find(f=>f.id===r.franja)?.label||r.franja)+' · '+r.ts+'</p></div><button onclick="eliminarRegistre('+r.id+')" style="color:#cbd5e1;font-size:1.25rem;background:none;border:none;cursor:pointer;">×</button></div>';}).join("")+'</div></div>'
+  :'<div style="background:white;border-radius:1rem;border:1px solid #e2e8f0;padding:2rem;text-align:center;"><div style="font-size:2rem;margin-bottom:0.5rem;">✅</div><p style="color:#64748b;font-size:0.875rem;">Cap suplència registrada per '+state.diaAvui+'.</p></div>')
+  +'<div style="display:flex;flex-direction:column;gap:0.75rem;"><h3 style="font-weight:700;color:#374151;font-size:0.875rem;padding:0 0.25rem;">Disponibilitat — '+state.diaAvui+'</h3>'+respostaAvui.map(({franja,suport,tp})=>'<div style="background:white;border-radius:1rem;border:1px solid #e2e8f0;overflow:hidden;"><div style="padding:0.625rem 1rem;background:#f8fafc;border-bottom:1px solid #f1f5f9;display:flex;justify-content:space-between;align-items:center;"><span style="font-weight:700;color:#374151;font-size:0.875rem;">'+(state.franges.find(f=>f.id===franja)?.label||franja)+'</span><span style="font-size:0.7rem;color:#94a3b8;">'+(suport.length+tp.length)+' disponibles</span></div><div style="padding:0.75rem;">'+(suport.length>0||tp.length>0?'<div style="display:flex;flex-wrap:wrap;gap:0.375rem;">'+suport.map(s=>'<span style="font-size:0.75rem;background:#fffbeb;border:1px solid #fde68a;color:#92400e;font-weight:500;padding:0.25rem 0.625rem;border-radius:0.5rem;">'+cap(s.nom)+'</span>').join("")+tp.map(s=>'<span style="font-size:0.75rem;background:#f8fafc;border:1px solid #cbd5e1;color:#64748b;font-weight:500;padding:0.25rem 0.625rem;border-radius:0.5rem;" title="T.P.">'+cap(s.nom)+' (T.P.)</span>').join("")+'</div>':"<p style='font-size:0.75rem;color:#94a3b8;'>Ningú disponible.</p>")+'</div></div>').join("")+'</div>'
+  :'<div style="background:white;border-radius:1rem;border:1px solid #e2e8f0;overflow:hidden;"><div style="padding:1rem 1.25rem;border-bottom:1px solid #f1f5f9;display:flex;align-items:center;justify-content:space-between;"><h2 style="font-weight:700;color:#1e293b;">Termòmetre del Claustre</h2><span style="background:#f1f5f9;color:#374151;font-size:0.75rem;font-weight:700;padding:0.25rem 0.625rem;border-radius:9999px;">'+state.registre.length+' total</span></div>'
+  +(estadistiques.length>0?'<div>'+estadistiques.map((e,i)=>{const maxT=estadistiques[0]?.total||1;const pct=Math.round(e.total/maxT*100);const colors=["#ef4444","#f97316","#eab308","#3b82f6","#8b5cf6"];const color=colors[Math.min(i,colors.length-1)];return'<div style="padding:0.75rem 1.25rem;border-bottom:1px solid #f8fafc;"><div style="display:flex;align-items:center;gap:0.75rem;margin-bottom:0.375rem;"><span style="width:1.5rem;height:1.5rem;border-radius:50%;background:'+color+';color:white;font-size:0.7rem;font-weight:900;display:flex;align-items:center;justify-content:center;flex-shrink:0;">'+(i+1)+'</span><span style="font-weight:600;color:#1e293b;font-size:0.875rem;flex:1;">'+cap(e.nom)+'</span><span style="font-weight:700;color:#374151;">'+e.total+'</span><span style="font-size:0.7rem;color:#94a3b8;">'+(e.total===1?"vegada":"vegades")+'</span></div><div style="margin-left:2.25rem;background:#f1f5f9;border-radius:9999px;height:0.375rem;overflow:hidden;"><div style="height:100%;border-radius:9999px;background:'+color+';width:'+pct+'%;"></div></div></div>';}).join("")+'</div>'
+  :'<div style="padding:2rem;text-align:center;"><div style="font-size:2rem;margin-bottom:0.5rem;">📊</div><p style="color:#64748b;font-size:0.875rem;">Encara no hi ha suplències registrades.</p></div>')+'</div>')
+  +'</div>';
+}
+function buildCriteris(){
+  const geminiOk=state.geminiActiu&&state.geminiKey;
+  return'<div style="padding:1rem;display:flex;flex-direction:column;gap:1rem;">'
+  +'<div style="background:white;border-radius:1rem;border:1px solid #e2e8f0;overflow:hidden;">'
+  +'<div style="padding:1rem 1.25rem;border-bottom:1px solid #f1f5f9;display:flex;align-items:center;justify-content:space-between;">'
+  +'<div><h2 style="font-weight:700;color:#1e293b;">Criteris de suplència</h2><p style="font-size:0.75rem;color:#94a3b8;margin-top:0.125rem;">Regles de la teva escola en llenguatge natural</p></div>'
+  +(state.criterisGuardats?'<span style="background:#dcfce7;color:#166534;font-size:0.7rem;font-weight:700;padding:0.25rem 0.625rem;border-radius:9999px;">&#10003; Actius</span>':"")
+  +'</div>'
+  +'<div style="padding:1.25rem;display:flex;flex-direction:column;gap:0.875rem;">'
+  +'<div><label style="font-size:0.7rem;font-weight:700;color:#64748b;text-transform:uppercase;letter-spacing:0.05em;display:block;margin-bottom:0.375rem;">Criteris de l\'escola</label>'
+  +'<textarea id="criteris-input" rows="6" placeholder="Exemple:\nEls mestres de suport ja assignats a l\'aula tenen prioritat absoluta.\nEls mestres amb T.P. poden ser cridats com a últim recurs.\nEl director i la cap d\'estudis no supleixen mai.\nEls mestres d\'infantil poden cobrir primària si cal." style="width:100%;border:1px solid #e2e8f0;border-radius:0.75rem;padding:0.875rem;font-size:0.875rem;color:#374151;resize:none;background:#f8fafc;line-height:1.6;">'+state.criterisText+'</textarea></div>'
+  +'<div style="background:'+(geminiOk?"#f0fdf4":"#f8fafc")+';border:1px solid '+(geminiOk?"#86efac":"#e2e8f0")+';border-radius:0.75rem;padding:0.875rem;">'
+  +'<div style="display:flex;align-items:center;gap:0.5rem;margin-bottom:0.5rem;">'
+  +'<span style="font-size:1rem;">&#10024;</span>'
+  +'<span style="font-size:0.8rem;font-weight:700;color:'+(geminiOk?"#166534":"#374151")+';">Gemini IA '+(geminiOk?"— Actiu":"— No configurat")+'</span>'
+  +(geminiOk?'<span style="background:#dcfce7;color:#166534;font-size:0.65rem;font-weight:700;padding:0.125rem 0.5rem;border-radius:9999px;">ON</span>':'<span style="background:#f1f5f9;color:#94a3b8;font-size:0.65rem;font-weight:700;padding:0.125rem 0.5rem;border-radius:9999px;">OFF</span>')
+  +'</div>'
+  +'<p style="font-size:0.72rem;color:#64748b;margin-bottom:0.5rem;">'+(geminiOk?"Gemini llegirà els teus criteris i proposarà les suplències automàticament.":"Afegeix la teva API key de Gemini per activar la IA. És gratuïta!")+'</p>'
+  +'<label style="font-size:0.7rem;font-weight:700;color:#64748b;display:block;margin-bottom:0.25rem;">API Key de Gemini</label>'
+  +'<input id="gemini-key-input" type="password" value="'+state.geminiKey+'" placeholder="AIza..." style="width:100%;border:1px solid #e2e8f0;border-radius:0.625rem;padding:0.5rem 0.75rem;font-size:0.8rem;color:#374151;background:white;margin-bottom:0.375rem;">'
+  +'<a href="https://aistudio.google.com/apikey" target="_blank" style="font-size:0.7rem;color:#2563eb;text-decoration:none;">&rarr; Obtén la teva API key gratuïta a Google AI Studio</a>'
+  +'</div>'
+  +'<button onclick="guardarCriteris()" style="width:100%;background:#2563eb;color:white;font-weight:700;padding:0.75rem;border-radius:0.75rem;border:none;cursor:pointer;font-size:0.9rem;">&#9881; Guardar criteris</button>'
+  +'</div></div>'
+  +'<div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:1rem;padding:1rem;">'
+  +'<p style="font-size:0.75rem;color:#64748b;line-height:1.6;"><strong>ℹ Sense Gemini:</strong> P1 suport natural, P2 suport general, P3 T.P.<br><strong>&#10024; Amb Gemini:</strong> Els criteris escrits s\'apliquen automàticament per a la teva escola.</p>'
+  +'</div>'
+  +'</div>';
+}
+function buildHoraris(){
+  const nomsMestres=Object.keys(state.mestres).sort();
+  const hasToken=!!currentUser?.accessToken;
+  return'<div style="padding:1rem;display:flex;flex-direction:column;gap:1rem;"><div style="background:white;border-radius:1rem;border:1px solid #e2e8f0;overflow:hidden;"><div style="padding:1rem 1.25rem;border-bottom:1px solid #f1f5f9;display:flex;align-items:center;justify-content:space-between;"><div><h2 style="font-weight:700;color:#1e293b;">Importar des de Drive</h2><p style="font-size:0.75rem;color:#94a3b8;margin-top:0.125rem;">Carpeta amb els horaris de l\'escola</p></div>'+(nomsMestres.length>0?'<span style="background:#dcfce7;color:#166534;font-size:0.7rem;font-weight:700;padding:0.25rem 0.625rem;border-radius:9999px;">'+nomsMestres.length+' mestres</span>':"")+' </div><div style="padding:1.25rem;display:flex;flex-direction:column;gap:0.875rem;">'
+  +(!hasToken?'<div style="background:#eff6ff;border:1px solid #bfdbfe;border-radius:0.75rem;padding:0.875rem;"><p style="font-size:0.875rem;color:#1d4ed8;font-weight:600;margin-bottom:0.5rem;">Cal permís per llegir Drive</p><p style="font-size:0.75rem;color:#3b82f6;margin-bottom:0.75rem;">Clica el botó per autoritzar l\'accés a la teva carpeta.</p><button onclick="loginWithGoogle()" style="width:100%;background:#2563eb;color:white;font-weight:700;padding:0.625rem;border-radius:0.625rem;border:none;cursor:pointer;font-size:0.875rem;">🔑 Autoritzar Google Drive</button></div>':"")
+  +'<div><label style="font-size:0.7rem;font-weight:700;color:#64748b;text-transform:uppercase;letter-spacing:0.05em;display:block;margin-bottom:0.375rem;">URL de la carpeta</label><input id="drive-url" type="url" value="'+state.driveUrl+'" placeholder="https://docs.google.com/spreadsheets/d/..." style="width:100%;border:1px solid #e2e8f0;border-radius:0.75rem;padding:0.625rem 0.875rem;font-size:0.875rem;color:#374151;background:#f8fafc;margin-bottom:0.5rem;"><button onclick="importarDriveAction()" '+(state.isLoadingDrive?"disabled":"")+' style="width:100%;background:'+(hasToken?"#2563eb":"#94a3b8")+';color:white;font-weight:700;padding:0.75rem;border-radius:0.75rem;border:none;cursor:'+(hasToken?"pointer":"default")+';font-size:0.875rem;display:flex;align-items:center;justify-content:center;gap:0.5rem;">'+(state.isLoadingDrive?'<div style="width:1rem;height:1rem;border:2px solid white;border-top-color:transparent;border-radius:50%;animation:spin 1s linear infinite;"></div> Llegint...':"📊 Importar Google Sheets")+'</button></div>'
+  +(state.driveEstat==="ok"?'<p style="font-size:0.75rem;color:#16a34a;font-weight:600;">✓ '+state.driveMsg+'</p>':"")
+  +(state.driveEstat==="error"?'<p style="font-size:0.75rem;color:#dc2626;">⚠ '+state.driveMsg+'</p>':"")
+  +(state.fitxersCarregats.length>0?'<div style="display:flex;flex-direction:column;gap:0.375rem;">'+state.fitxersCarregats.map(f=>'<div style="display:flex;align-items:center;gap:0.5rem;border-radius:0.5rem;padding:0.5rem 0.75rem;font-size:0.75rem;background:'+(f.ok?"#f0fdf4":"#fef2f2")+';border:1px solid '+(f.ok?"#bbf7d0":"#fecaca")+';">'+(f.ok?"✅":"❌")+'<span style="color:'+(f.ok?"#374151":"#dc2626")+';font-weight:500;flex:1;">'+f.nom+'</span></div>').join("")+'</div>':"")
+  +'</div></div>'
+  +'<div style="background:#fffbeb;border:1px solid #fde68a;border-radius:0.75rem;padding:0.875rem;"><p style="font-size:0.75rem;color:#92400e;line-height:1.6;"><strong>💡 Com configurar els horaris:</strong><br>1. Obre la <a href="https://docs.google.com/spreadsheets/d/1Lzd9eK28Ti9E_SYyDfgebDCmd9FuGRGq45oDMxTzxUY/edit" target="_blank" style="color:#92400e;font-weight:700;">plantilla d&apos;horaris</a> i fes-ne una c&ograve;pia (Fitxer &rarr; Fes una c&ograve;pia).<br>2. Omple una pestanya per cada mestre (copia PLANTILLA_MESTRE i canvia el nom).<br>3. Comparteix: "Qualsevol amb l&apos;enlla&ccedil; pot veure&apos;l".<br>4. Enganxa l&apos;URL aqu&iacute; dalt i clica Importar.</p></div>'
+  +(nomsMestres.length>0?'<div style="background:white;border-radius:1rem;border:1px solid #e2e8f0;overflow:hidden;"><div style="padding:0.875rem 1.25rem;border-bottom:1px solid #f1f5f9;"><h3 style="font-weight:700;color:#374151;font-size:0.875rem;">Mestres carregats ('+nomsMestres.length+')</h3></div><div style="padding:1rem;display:flex;flex-wrap:wrap;gap:0.5rem;">'+nomsMestres.map(nom=>'<div style="display:flex;align-items:center;gap:0.375rem;background:#f8fafc;border:1px solid #e2e8f0;border-radius:0.75rem;padding:0.375rem 0.75rem;"><div style="width:0.375rem;height:0.375rem;border-radius:50%;background:#22c55e;"></div><span style="font-size:0.75rem;font-weight:600;color:#374151;">'+cap(nom)+'</span></div>').join("")+'</div><div style="padding:0.75rem 1.25rem;border-top:1px solid #f1f5f9;"><button onclick="esborrarHoraris()" style="font-size:0.75rem;color:#94a3b8;background:none;border:none;cursor:pointer;">Esborrar tots els horaris</button></div></div>':"")
+  +'<style>@keyframes spin{to{transform:rotate(360deg)}}</style></div>';
+}
+
+window.setPage=p=>setState({page:p});
+window.canviarEtapa=function(id){canviarEtapa(id);};
+window.setSubpagina=p=>setState({subpaginaAvui:p});
+window.setDia=d=>setState({diaC:d,resultatsMultiple:null,canvisManuals:{}});
+window.setDiaAvui=d=>setState({diaAvui:d});
+window.afegirAbsent=nom=>{if(!nom||state.absentsAmbFranges.find(a=>a.nom===nom))return;setState({absentsAmbFranges:[...state.absentsAmbFranges,{nom,franges:[]}],resultatsMultiple:null,canvisManuals:{}});};
+window.eliminarAbsent=nom=>setState({absentsAmbFranges:state.absentsAmbFranges.filter(a=>a.nom!==nom),resultatsMultiple:null,canvisManuals:{}});
+window.toggleFranja=(nom,franja)=>setState({absentsAmbFranges:state.absentsAmbFranges.map(a=>a.nom!==nom?a:{...a,franges:a.franges.includes(franja)?a.franges.filter(f=>f!==franja):[...a.franges,franja]}),resultatsMultiple:null,canvisManuals:{}});
+window.marcarTotElDia=nom=>setState({absentsAmbFranges:state.absentsAmbFranges.map(a=>a.nom===nom?{...a,franges:[...state.franges.map(f=>f.id)]}:a),resultatsMultiple:null,canvisManuals:{}});
+window.setCanviManual=(clau,val)=>{state.canvisManuals={...state.canvisManuals,[clau]:val||null};};
+
+async function assignarAmbGemini(absentsAmbFranges, dia, mestres, franges, criterisText) {
+  if (!state.geminiKey || !criterisText.trim()) return null;
+  var lines = [];
+  lines.push("Ets un assistent per gestionar suplencies d'urgencia en un centre educatiu.");
+  lines.push("");
+  lines.push("CRITERIS DE L'ESCOLA:");
+  lines.push(criterisText);
+  lines.push("");
+  lines.push("SITUACIO:");
+  lines.push("Dia: " + dia);
+  lines.push("Mestres absents:");
+  for (var i = 0; i < absentsAmbFranges.length; i++) {
+    var a = absentsAmbFranges[i];
+    lines.push("- " + a.nom + ": franges " + a.franges.join(", "));
+  }
+  lines.push("");
+  lines.push("MESTRES DISPONIBLES PER FRANJA:");
+  for (var j = 0; j < absentsAmbFranges.length; j++) {
+    var absent = absentsAmbFranges[j];
+    for (var k = 0; k < absent.franges.length; k++) {
+      var franja = absent.franges[k];
+      var label = (franges.find(function(f){return f.id===franja;})||{}).label || franja;
+      lines.push(label + ":");
+      var trovat = false;
+      for (var nomM in mestres) {
+        if (nomM === absent.nom.toUpperCase()) continue;
+        var act = (mestres[nomM][dia]||{})[franja] || "";
+        var t = tipusSuplent(act);
+        if (t === "SUPORT_GENERAL" || t === "TP" || t === "LLIURE") {
+          lines.push("  - " + nomM + " (" + (act||"Lliure") + ")");
+          trovat = true;
+        }
+      }
+      if (!trovat) lines.push("  (ningu disponible)");
+    }
+  }
+  lines.push("");
+  lines.push("Tenint en compte els criteris, proposa qui ha de fer cada suplencia.");
+  lines.push("Respon NOMES en format JSON:");
+  lines.push('{"assignacions":[{"absent":"NOM","franja":"ID","suplent":"NOM_SUPLENT","motiu":"breu"},...]}}');
+  lines.push("Si no hi ha ningu, posa suplent:null.");
+  var prompt = lines.join("\n");
+  try {
+    var url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=" + state.geminiKey;
+    var resp = await fetch(url, {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({
+        contents: [{parts: [{text: prompt}]}],
+        generationConfig: {temperature: 0.1, maxOutputTokens: 1000}
+      })
+    });
+    if (!resp.ok) throw new Error("Error Gemini: " + resp.status);
+    var data = await resp.json();
+    var text = ((((data.candidates||[])[0]||{}).content||{}).parts||[{text:""}])[0].text || "";
+    var clean = text.replace(/```json/g,"").replace(/```/g,"").trim();
+    return JSON.parse(clean);
+  } catch(e) {
+    console.error("Error Gemini:", e);
+    return null;
+  }
+}
+
+
+window.handleCerca=async()=>{
+  const absentPerFranja={};
+  for(const{nom,franges:fs}of state.absentsAmbFranges)for(const f of fs){if(!absentPerFranja[f])absentPerFranja[f]=[];absentPerFranja[f].push(nom);}
+  const totsAbsents=state.absentsAmbFranges.map(a=>a.nom);
+  // Calcular primer amb lògica bàsica
+  const resultatBase=assignacioMultiple(state.mestres,totsAbsents,state.diaC,Object.keys(absentPerFranja),absentPerFranja,state.franges);
+  setState({resultatsMultiple:resultatBase,canvisManuals:{},geminiEstat:null});
+  // Si Gemini actiu i hi ha criteris, aplicar per sobre
+  if(state.geminiActiu&&state.geminiKey&&state.criterisText.trim()){
+    setState({geminiEstat:"carregant"});
+    const geminiResp=await assignarAmbGemini(state.absentsAmbFranges,state.diaC,state.mestres,state.franges,state.criterisText);
+    if(geminiResp?.assignacions){
+      const canvis={};
+      for(const a of geminiResp.assignacions){
+        if(a.suplent){
+          const clau=a.franja+"__"+a.absent.toUpperCase();
+          canvis[clau]=a.suplent.toUpperCase();
+        }
+      }
+      setState({canvisManuals:canvis,geminiEstat:"ok"});
+    } else {
+      setState({geminiEstat:"error"});
+    }
+  }
+};
+window.assignarUn=(franja,absent)=>{
+  const clau=franja+"__"+absent;
+  const a=state.resultatsMultiple?.[franja]?.find(x=>x.absent===absent);
+  if(!a)return;
+  const suplentFinal=state.canvisManuals[clau]||a.suplent;
+  if(!suplentFinal)return;
+  const nou={id:Date.now()+Math.random(),absent,suplent:suplentFinal,dia:state.diaC,franja,prioritat:a.p,motiu:a.motiu,ts:new Date().toLocaleTimeString("ca",{hour:"2-digit",minute:"2-digit"})};
+  const novaLlista=[nou,...state.registre];
+  sSet("registre",{llista:novaLlista});
+  setState({registre:novaLlista});
+};
+window.assignarTot=()=>{
+  if(!state.resultatsMultiple)return;
+  const noves=[];
+  for(const[franja,assignacions]of Object.entries(state.resultatsMultiple)){
+    for(const a of assignacions){
+      if(a.p===-1)continue;
+      const clau=franja+"__"+a.absent;
+      const sf=state.canvisManuals[clau]||a.suplent;
+      if(!sf)continue;
+      noves.push({id:Date.now()+Math.random(),absent:a.absent,suplent:sf,dia:state.diaC,franja,prioritat:a.p,motiu:a.motiu,ts:new Date().toLocaleTimeString("ca",{hour:"2-digit",minute:"2-digit"})});
+    }
+  }
+  const novaLlista=[...noves,...state.registre];
+  sSet("registre",{llista:novaLlista});
+  setState({registre:novaLlista});
+};
+window.eliminarRegistre=id=>{const novaLlista=state.registre.filter(r=>r.id!==id);sSet("registre",{llista:novaLlista});setState({registre:novaLlista});};
+window.guardarCriteris=()=>{const text=document.getElementById("criteris-input")?.value||"";const key=document.getElementById("gemini-key-input")?.value||"";sSet("criteris",{text,geminiKey:key});setState({criterisText:text,geminiKey:key,geminiActiu:!!key,criterisGuardats:true});};
+window.importarDriveAction=()=>{const url=document.getElementById("drive-url")?.value||"";state.driveUrl=url;sSet("sheetsUrl",url);importarDrive();};
+window.esborrarHoraris=()=>{if(!confirm("Segur que vols esborrar tots els horaris?"))return;sSet("horaris",{text:""});setState({mestres:{},fitxersCarregats:[]});};
+window.logout=logout;
+window.loginWithGoogle=loginWithGoogle;
+
+initGoogleLogin();
+render();
+</script>
+</body>
+</html>
